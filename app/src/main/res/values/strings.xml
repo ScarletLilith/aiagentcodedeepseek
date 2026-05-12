@@ -1,0 +1,37 @@
+<resources>
+    <string name="app_name">AgentMemory</string>
+    <string name="settings">设置</string>
+    <string name="verify">验证</string>
+    <string name="editor">编辑器</string>
+    <string name="rules">规则</string>
+    <string name="model_config">模型配置</string>
+    <string name="api_url">API 地址</string>
+    <string name="api_key">API 密钥</string>
+    <string name="model_name">模型名称</string>
+    <string name="temperature">温度</string>
+    <string name="max_tokens">最大 Token</string>
+    <string name="top_p">Top P</string>
+    <string name="mcp_config">MCP 连接配置</string>
+    <string name="enable_mcp">启用 MCP</string>
+    <string name="mcp_service_url">MCP 服务地址</string>
+    <string name="tools">工具管理</string>
+    <string name="add_tool">添加新工具</string>
+    <string name="skills">技能管理</string>
+    <string name="knowledge_bases">知识库配置</string>
+    <string name="rules_management">规则引擎</string>
+    <string name="export_config">导出配置</string>
+    <string name="import_config">导入配置</string>
+    <string name="save">保存</string>
+    <string name="cancel">取消</string>
+    <string name="initialize_memory">初始化记忆系统</string>
+    <string name="test_memory">测试记忆检索</string>
+    <string name="installing">正在安装...</string>
+    <string name="extracting">正在解压...</string>
+    <string name="installation_complete">安装完成</string>
+    <string name="function_name">函数名</string>
+    <string name="description">描述</string>
+    <string name="parameters">参数</string>
+    <string name="code">代码</string>
+    <string name="type">类型</string>
+    <string name="required">必填</string>
+</resources>

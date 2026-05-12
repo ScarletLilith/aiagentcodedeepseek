@@ -1,0 +1,51 @@
+{
+  "model": {
+    "apiUrl": "https://api.openai.com/v1",
+    "apiKey": "sk-...",
+    "modelName": "gpt-4",
+    "temperature": 0.7,
+    "maxTokens": 2048,
+    "topP": 1.0
+  },
+  "mcp": {
+    "enabled": true,
+    "serviceUrl": "http://localhost:18989/mcp",
+    "apiKey": "your_mcp_key"
+  },
+  "tools": [
+    {
+      "name": "web_search",
+      "description": "Search the web for information",
+      "parameters": [
+        {"name": "query", "type": "string", "description": "Search query", "required": true}
+      ],
+      "code": "def web_search(query):\n    import requests\n    return requests.get('https://search.example.com', params={'q': query}).json()",
+      "enabled": true
+    }
+  ],
+  "skills": [
+    {"name": "coding_assistant", "description": "Help with coding tasks", "enabled": true},
+    {"name": "code_review", "description": "Review code for issues", "enabled": true}
+  ],
+  "knowledgeBases": [
+    {"name": "docs", "path": "/root/docs", "enabled": true}
+  ],
+  "rules": [
+    {
+      "id": "1",
+      "name": "Be Helpful",
+      "description": "Always be helpful and polite",
+      "content": "Always assist the user in their goals",
+      "type": "global",
+      "enabled": true
+    },
+    {
+      "id": "2",
+      "name": "Python Style",
+      "description": "Use Pythonic style",
+      "content": "Follow PEP 8 guidelines",
+      "type": "project",
+      "enabled": true
+    }
+  ]
+}
