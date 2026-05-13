@@ -17,11 +17,13 @@ class ContextManager(private val context: Context) {
         private const val TAG = "ContextManager"
         private const val CONTEXT_FILE = "context_history.json"
         private const val MAX_HISTORY = 1000
+        private const val AUTO_SNAPSHOT_INTERVAL = 10
     }
 
     private val json = Json {
         ignoreUnknownKeys = true
         prettyPrint = true
+        encodeDefaults = true
     }
 
     private val contextFile: File
@@ -32,6 +34,14 @@ class ContextManager(private val context: Context) {
 
     private val _contextHistory = MutableStateFlow<List<ContextEntry>>(emptyList())
     val contextHistory: StateFlow<List<ContextEntry>> = _contextHistory
+
+    private val _messageCount = MutableStateFlow(0)
+    val messageCount: StateFlow<Int> = _messageCount
+
+    private val gitSnapshotManager = GitSnapshotManager(context)
+
+    val snapshotManager: GitSnapshotManager
+        get() = gitSnapshotManager
 
     data class ContextBundle(
         val query: String,
@@ -76,6 +86,12 @@ class ContextManager(private val context: Context) {
 
     private fun generateEntryId(): String {
         return "entry_${System.currentTimeMillis()}_${(1000..9999).random()}"
+    }
+
+    init {
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            loadFromFile()
+        }
     }
 
     suspend fun buildContext(
@@ -177,11 +193,114 @@ class ContextManager(private val context: Context) {
             }
             
             _contextHistory.value = currentHistory
+            _messageCount.value = currentHistory.size
             saveToFile()
 
             Log.d(TAG, "Saved entry to history: ${entry.id}")
+
+            if (currentHistory.size % AUTO_SNAPSHOT_INTERVAL == 0) {
+                createAutoSnapshot()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save to history", e)
+        }
+    }
+
+    suspend fun createAutoSnapshot(description: String = "Auto snapshot"): Result<GitSnapshotManager.Snapshot> {
+        val messages = _contextHistory.value.map { entry ->
+            GitSnapshotManager.ConversationMessage(
+                id = entry.id,
+                role = "user",
+                content = entry.query,
+                timestamp = entry.timestamp
+            )
+        }.toMutableList()
+
+        _contextHistory.value.forEach { entry ->
+            entry.response?.let { response ->
+                messages.add(
+                    GitSnapshotManager.ConversationMessage(
+                        id = "${entry.id}_response",
+                        role = "assistant",
+                        content = response,
+                        timestamp = entry.timestamp
+                    )
+                )
+            }
+        }
+
+        return gitSnapshotManager.createSnapshot(
+            messages = messages,
+            description = description,
+            tags = listOf("auto")
+        )
+    }
+
+    suspend fun createSnapshot(
+        description: String = "Manual snapshot",
+        tags: List<String> = emptyList()
+    ): Result<GitSnapshotManager.Snapshot> {
+        val messages = _contextHistory.value.flatMap { entry ->
+            val msgList = mutableListOf(
+                GitSnapshotManager.ConversationMessage(
+                    id = entry.id,
+                    role = "user",
+                    content = entry.query,
+                    timestamp = entry.timestamp
+                )
+            )
+            entry.response?.let { response ->
+                msgList.add(
+                    GitSnapshotManager.ConversationMessage(
+                        id = "${entry.id}_response",
+                        role = "assistant",
+                        content = response,
+                        timestamp = entry.timestamp
+                    )
+                )
+            }
+            msgList
+        }
+
+        return gitSnapshotManager.createSnapshot(
+            messages = messages,
+            description = description,
+            tags = tags
+        )
+    }
+
+    suspend fun restoreSnapshot(snapshotId: String): Result<Unit> {
+        val result = gitSnapshotManager.restoreSnapshot(snapshotId)
+        
+        return if (result.isSuccess) {
+            try {
+                val snapshot = result.getOrNull()!!
+                val entries = snapshot.messages.map { message ->
+                    val memoryEntries = message.content.takeIf { message.role == "user" }?.let {
+                        emptyList<MemoryEntry>()
+                    } ?: emptyList()
+
+                    ContextEntry(
+                        id = message.id,
+                        query = if (message.role == "user") message.content else "",
+                        memories = memoryEntries,
+                        response = if (message.role == "assistant") message.content else null,
+                        timestamp = message.timestamp,
+                        sessionId = "restored_${snapshot.id}",
+                        tags = emptyList()
+                    )
+                }.filter { it.query.isNotEmpty() || it.response != null }
+
+                _contextHistory.value = entries
+                _messageCount.value = entries.size
+                saveToFile()
+
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        } else {
+            Result.failure(result.exceptionOrNull() ?: Exception("Unknown error"))
         }
     }
 
@@ -235,6 +354,7 @@ class ContextManager(private val context: Context) {
                 val content = contextFile.readText()
                 val entries = json.decodeFromString<List<ContextEntry>>(content)
                 _contextHistory.value = entries
+                _messageCount.value = entries.size
                 Log.d(TAG, "Loaded ${entries.size} entries from file")
             }
         } catch (e: Exception) {
@@ -255,6 +375,7 @@ class ContextManager(private val context: Context) {
     suspend fun clearHistory() = withContext(Dispatchers.IO) {
         _contextHistory.value = emptyList()
         _currentContext.value = null
+        _messageCount.value = 0
         if (contextFile.exists()) {
             contextFile.delete()
         }
@@ -329,4 +450,22 @@ class ContextManager(private val context: Context) {
         val avgMemoriesPerQuery: Float,
         val topWings: List<Pair<String, Int>>
     )
+
+    private object kotlinx {
+        object coroutines {
+            object GlobalScope {
+                fun launch(context: kotlinx.coroutines.CoroutineDispatcher, block: suspend () -> Unit) {
+                    kotlinx.coroutines.CoroutineScope(context).launch { block() }
+                }
+            }
+            
+            object CoroutineScope {
+                operator fun invoke(context: kotlinx.coroutines.CoroutineDispatcher) = object {
+                    fun launch(block: suspend () -> Unit) {
+                        kotlinx.coroutines.GlobalScope.launch(context, block)
+                    }
+                }
+            }
+        }
+    }
 }
