@@ -250,11 +250,9 @@ class SettingsViewModel(private val context: Context) {
             try {
                 val mcpConfig = mcpConfig.firstOrNull() ?: return@withContext Result.failure(Exception("MCP config not found"))
                 
-                // Calculate register tool URL (replace /mcp with /register_tool)
                 val baseUrl = mcpConfig.serviceUrl.replace("/mcp", "")
                 val registerUrl = URL("$baseUrl/register_tool")
                 
-                // Build request body
                 val requestBody = json.encodeToString(
                     mapOf(
                         "name" to tool.name,
@@ -264,7 +262,6 @@ class SettingsViewModel(private val context: Context) {
                     )
                 )
                 
-                // Make HTTP request
                 val connection = registerUrl.openConnection() as HttpURLConnection
                 connection.apply {
                     requestMethod = "POST"
@@ -275,10 +272,8 @@ class SettingsViewModel(private val context: Context) {
                     readTimeout = 30000
                 }
                 
-                // Send request
                 connection.outputStream.use { it.write(requestBody.toByteArray(Charsets.UTF_8)) }
                 
-                // Read response
                 val responseCode = connection.responseCode
                 val response = if (responseCode in 200..299) {
                     connection.inputStream.bufferedReader().use { it.readText() }
@@ -298,6 +293,153 @@ class SettingsViewModel(private val context: Context) {
                 Result.failure(e)
             }
         }
+    }
+
+    /**
+     * Get all enabled rules formatted for AI injection
+     */
+    suspend fun getFormattedRules(currentFileType: String? = null): String {
+        val allRules = rulesConfig.firstOrNull() ?: emptyList()
+        
+        val formattedRules = mutableListOf<String>()
+        
+        formattedRules.add("# 全局规则 (Global Rules)")
+        allRules.filter { it.type == "global" && it.enabled }
+            .forEach { rule ->
+                formattedRules.add("## ${rule.name}")
+                formattedRules.add(rule.content)
+                formattedRules.add("")
+            }
+        
+        formattedRules.add("# 项目规则 (Project Rules)")
+        allRules.filter { it.type == "project" && it.enabled }
+            .forEach { rule ->
+                formattedRules.add("## ${rule.name}")
+                formattedRules.add(rule.description)
+                formattedRules.add(rule.content)
+                formattedRules.add("")
+            }
+        
+        if (currentFileType != null) {
+            formattedRules.add("# 动态规则 (Dynamic Rules for $currentFileType)")
+            allRules.filter { rule ->
+                rule.type == "dynamic" && 
+                rule.enabled && 
+                (rule.description.contains(currentFileType, ignoreCase = true) || 
+                 rule.name.contains(currentFileType, ignoreCase = true))
+            }.forEach { rule ->
+                formattedRules.add("## ${rule.name}")
+                formattedRules.add(rule.content)
+                formattedRules.add("")
+            }
+        }
+        
+        return if (formattedRules.size > 2) {
+            """
+            |# Agent Behavior Rules
+            |
+            |${formattedRules.joinToString("\n")}
+            |
+            |IMPORTANT: Follow these rules when generating code or responding to queries.
+            """.trimMargin()
+        } else {
+            ""
+        }
+    }
+
+    /**
+     * Get rules filtered by type
+     */
+    suspend fun getRulesByType(type: String): List<RuleConfig> {
+        val allRules = rulesConfig.firstOrNull() ?: emptyList()
+        return allRules.filter { it.type == type && it.enabled }
+    }
+
+    /**
+     * Get only enabled rules
+     */
+    suspend fun getActiveRules(): List<RuleConfig> {
+        val allRules = rulesConfig.firstOrNull() ?: emptyList()
+        return allRules.filter { it.enabled }
+    }
+
+    /**
+     * Load knowledge bases by calling palace-daemon API
+     */
+    suspend fun loadKnowledgeBases(): Result<String> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val mcpConfig = mcpConfig.firstOrNull() ?: McpConfig()
+                if (!mcpConfig.enabled) {
+                    return@withContext Result.success("MCP is disabled, skipping knowledge base loading")
+                }
+                
+                val knowledgeBases = knowledgeBasesConfig.firstOrNull() ?: emptyList()
+                val enabledBases = knowledgeBases.filter { it.enabled }
+                
+                if (enabledBases.isEmpty()) {
+                    return@withContext Result.success("No enabled knowledge bases")
+                }
+                
+                val baseUrl = mcpConfig.serviceUrl.replace("/mcp", "")
+                val loadUrl = URL("$baseUrl/load_knowledge_base")
+                
+                val results = mutableListOf<String>()
+                
+                for (base in enabledBases) {
+                    try {
+                        val requestBody = json.encodeToString(
+                            mapOf(
+                                "name" to base.name,
+                                "path" to base.path
+                            )
+                        )
+                        
+                        val connection = loadUrl.openConnection() as HttpURLConnection
+                        connection.apply {
+                            requestMethod = "POST"
+                            setRequestProperty("Content-Type", "application/json")
+                            setRequestProperty("Authorization", "Bearer ${mcpConfig.apiKey}")
+                            doOutput = true
+                            connectTimeout = 10000
+                            readTimeout = 30000
+                        }
+                        
+                        connection.outputStream.use { it.write(requestBody.toByteArray(Charsets.UTF_8)) }
+                        
+                        val responseCode = connection.responseCode
+                        val response = if (responseCode in 200..299) {
+                            connection.inputStream.bufferedReader().use { it.readText() }
+                        } else {
+                            connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "Unknown error"
+                        }
+                        
+                        connection.disconnect()
+                        
+                        if (responseCode in 200..299) {
+                            results.add("✓ Loaded: ${base.name}")
+                        } else {
+                            results.add("✗ Failed: ${base.name} - $response")
+                        }
+                    } catch (e: Exception) {
+                        results.add("✗ Error loading ${base.name}: ${e.message}")
+                    }
+                }
+                
+                Result.success(results.joinToString("\n"))
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Result.failure(e)
+            }
+        }
+    }
+
+    /**
+     * Get enabled knowledge bases
+     */
+    suspend fun getEnabledKnowledgeBases(): List<KnowledgeBaseConfig> {
+        val allBases = knowledgeBasesConfig.firstOrNull() ?: emptyList()
+        return allBases.filter { it.enabled }
     }
 
     private suspend fun <T> Flow<T>.getOrNull(): T? {

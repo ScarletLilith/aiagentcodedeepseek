@@ -1,5 +1,6 @@
 package com.example.agentmemory
 
+import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -12,6 +13,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -86,6 +88,33 @@ fun SettingsScreen(
                 context.contentResolver.openInputStream(it)?.use { is ->
                     val success = viewModel.importConfig(is)
                     Toast.makeText(context, if (success) "导入成功" else "导入失败", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val shareLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        uri?.let {
+            scope.launch {
+                try {
+                    context.contentResolver.openOutputStream(it)?.use { os ->
+                        val success = viewModel.exportConfig(os)
+                        if (success) {
+                            Toast.makeText(context, "配置已保存，正在准备分享...", Toast.LENGTH_SHORT).show()
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "application/json"
+                                putExtra(Intent.EXTRA_STREAM, it)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(shareIntent, "分享配置"))
+                        } else {
+                            Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "分享失败: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -503,20 +532,42 @@ fun ToolDialog(
     var description by remember { mutableStateOf(initialTool?.description ?: "") }
     var parameters by remember { mutableStateOf(initialTool?.parameters ?: emptyList()) }
     var code by remember { mutableStateOf(initialTool?.code ?: "") }
+    var showParameterDialog by remember { mutableStateOf(false) }
+    var editingParameter by remember { mutableStateOf<ToolParameter?>(null) }
+    
+    if (showParameterDialog) {
+        ParameterDialog(
+            initialParameter = editingParameter,
+            onDismiss = {
+                showParameterDialog = false
+                editingParameter = null
+            },
+            onSave = { param ->
+                if (editingParameter != null) {
+                    parameters = parameters.map { if (it == editingParameter) param else it }
+                } else {
+                    parameters = parameters + param
+                }
+                showParameterDialog = false
+                editingParameter = null
+            }
+        )
+    }
     
     AlertDialog(
         onDismissRequest = if (!isRegistering) onDismiss else {},
-        title = { Text(if (initialTool == null) "Add Tool" else "Edit Tool") },
+        title = { Text(if (initialTool == null) "添加工具" else "编辑工具") },
         text = {
             LazyColumn {
                 item {
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it },
-                        label = { Text(context.getString(R.string.function_name)) },
+                        label = { Text("函数名") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        enabled = !isRegistering
+                        enabled = !isRegistering,
+                        supportingText = { Text("英文标识符，例如：get_weather") }
                     )
                 }
                 item {
@@ -524,30 +575,106 @@ fun ToolDialog(
                     OutlinedTextField(
                         value = description,
                         onValueChange = { description = it },
-                        label = { Text(context.getString(R.string.description)) },
+                        label = { Text("功能描述") },
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = !isRegistering
+                        enabled = !isRegistering,
+                        supportingText = { Text("简要描述工具的功能") }
                     )
                 }
                 item {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Parameters:", style = MaterialTheme.typography.labelLarge)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("参数列表", style = MaterialTheme.typography.titleSmall)
+                        TextButton(
+                            onClick = {
+                                editingParameter = null
+                                showParameterDialog = true
+                            },
+                            enabled = !isRegistering
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "添加参数", modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("添加")
+                        }
+                    }
                 }
-                items(parameters) { param ->
-                    Row(modifier = Modifier.padding(vertical = 4.dp)) {
-                        Text("${param.name} (${param.type})")
+                if (parameters.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Text(
+                                "暂无参数，点击上方按钮添加",
+                                modifier = Modifier.padding(16.dp),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                } else {
+                    items(parameters.size) { index ->
+                        val param = parameters[index]
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        param.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        "类型: ${param.type} | ${if (param.required) "必填" else "可选"}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        param.description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        editingParameter = param
+                                        showParameterDialog = true
+                                    },
+                                    enabled = !isRegistering
+                                ) {
+                                    Icon(Icons.Default.Edit, contentDescription = "编辑")
+                                }
+                                IconButton(
+                                    onClick = {
+                                        parameters = parameters - param
+                                    },
+                                    enabled = !isRegistering
+                                ) {
+                                    Icon(Icons.Default.Delete, contentDescription = "删除")
+                                }
+                            }
+                        }
                     }
                 }
                 item {
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
                     OutlinedTextField(
                         value = code,
                         onValueChange = { code = it },
-                        label = { Text(context.getString(R.string.code)) },
+                        label = { Text("Python 代码") },
                         modifier = Modifier.fillMaxWidth(),
-                        minLines = 5,
+                        minLines = 8,
                         maxLines = 15,
-                        enabled = !isRegistering
+                        enabled = !isRegistering,
+                        supportingText = { Text("粘贴完整的 Python 函数体") }
                     )
                 }
                 if (isRegistering) {
@@ -574,7 +701,7 @@ fun ToolDialog(
                 },
                 enabled = !isRegistering && name.isNotBlank() && description.isNotBlank() && code.isNotBlank()
             ) {
-                Text(context.getString(R.string.save))
+                Text("保存")
             }
         },
         dismissButton = {
@@ -582,7 +709,107 @@ fun ToolDialog(
                 onClick = onDismiss,
                 enabled = !isRegistering
             ) {
-                Text(context.getString(R.string.cancel))
+                Text("取消")
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ParameterDialog(
+    initialParameter: ToolParameter?,
+    onDismiss: () -> Unit,
+    onSave: (ToolParameter) -> Unit
+) {
+    var name by remember { mutableStateOf(initialParameter?.name ?: "") }
+    var type by remember { mutableStateOf(initialParameter?.type ?: "string") }
+    var description by remember { mutableStateOf(initialParameter?.description ?: "") }
+    var required by remember { mutableStateOf(initialParameter?.required ?: false) }
+    var typeExpanded by remember { mutableStateOf(false) }
+    val types = listOf("string", "number", "boolean", "object")
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (initialParameter == null) "添加参数" else "编辑参数") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("参数名称") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = { Text("英文标识符") }
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                ExposedDropdownMenuBox(
+                    expanded = typeExpanded,
+                    onExpandedChange = { typeExpanded = !typeExpanded }
+                ) {
+                    OutlinedTextField(
+                        value = type,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("参数类型") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = typeExpanded) },
+                        modifier = Modifier.fillMaxWidth().menuAnchor()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = typeExpanded,
+                        onDismissRequest = { typeExpanded = false }
+                    ) {
+                        types.forEach { t ->
+                            DropdownMenuItem(
+                                text = { Text(t) },
+                                onClick = {
+                                    type = t
+                                    typeExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("参数描述") },
+                    modifier = Modifier.fillMaxWidth(),
+                    supportingText = { Text("描述参数的用途") }
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("必填参数")
+                    Switch(
+                        checked = required,
+                        onCheckedChange = { required = it }
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (name.isNotBlank() && description.isNotBlank()) {
+                        onSave(ToolParameter(name, type, description, required))
+                    }
+                },
+                enabled = name.isNotBlank() && description.isNotBlank()
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
             }
         }
     )

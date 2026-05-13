@@ -1,6 +1,7 @@
 package com.example.agentmemory
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -11,12 +12,17 @@ import java.util.zip.ZipInputStream
 
 class LinuxSubsystemManager(private val context: Context) {
 
+    companion object {
+        private const val TAG = "LinuxSubsystem"
+        private const val INSTALL_TIMEOUT_MS = 600000L
+    }
+
     sealed class InstallationState {
         object Idle : InstallationState()
-        data class Extracting(val progress: Int) : InstallationState()
-        data class Installing(val message: String) : InstallationState()
+        data class Extracting(val progress: Int, val currentFile: String = "") : InstallationState()
+        data class Installing(val progress: Int, val message: String, val details: List<String> = emptyList()) : InstallationState()
         object Complete : InstallationState()
-        data class Error(val message: String) : InstallationState()
+        data class Error(val message: String, val details: String? = null) : InstallationState()
     }
 
     private val _installationState = MutableStateFlow<InstallationState>(InstallationState.Idle)
@@ -37,11 +43,13 @@ class LinuxSubsystemManager(private val context: Context) {
 
         withContext(Dispatchers.IO) {
             try {
-                _installationState.value = InstallationState.Extracting(0)
+                bootstrapDir.mkdirs()
+                
+                _installationState.value = InstallationState.Extracting(0, "准备解压...")
                 extractAssets()
-                _installationState.value = InstallationState.Extracting(100)
+                _installationState.value = InstallationState.Extracting(100, "解压完成")
 
-                _installationState.value = InstallationState.Installing("Running installation script...")
+                _installationState.value = InstallationState.Installing(0, "开始安装...", listOf("正在初始化 Linux 子系统..."))
                 runInstallationScript()
 
                 installedFlag.createNewFile()
@@ -49,43 +57,73 @@ class LinuxSubsystemManager(private val context: Context) {
 
                 startDaemon()
             } catch (e: Exception) {
-                _installationState.value = InstallationState.Error(e.message ?: "Unknown error")
+                Log.e(TAG, "Installation failed", e)
+                _installationState.value = InstallationState.Error(
+                    message = "安装失败: ${e.message}",
+                    details = e.stackTraceToString()
+                )
             }
         }
     }
 
     private fun extractAssets() {
-        bootstrapDir.mkdirs()
-
         val bootstrapZip = context.assets.open("bootstrap-aarch64.zip")
         val serverBundleZip = context.assets.open("server-bundle.zip")
 
-        extractZip(bootstrapZip, bootstrapDir, 0, 50)
-        extractZip(serverBundleZip, bootstrapDir, 50, 100)
+        extractZip(bootstrapZip, bootstrapDir, 0, 50, "Bootstrap")
+        extractZip(serverBundleZip, bootstrapDir, 50, 100, "Server Bundle")
     }
 
-    private fun extractZip(zipStream: java.io.InputStream, destDir: File, startProgress: Int, endProgress: Int) {
+    private fun extractZip(
+        zipStream: java.io.InputStream,
+        destDir: File,
+        startProgress: Int,
+        endProgress: Int,
+        label: String
+    ) {
         ZipInputStream(zipStream).use { zis ->
+            val entries = mutableListOf<ZipEntry>()
             var entry = zis.nextEntry
-            var count = 0
-            val buffer = ByteArray(4096)
-
+            
             while (entry != null) {
-                val file = File(destDir, entry.name)
-                if (entry.isDirectory) {
-                    file.mkdirs()
-                } else {
-                    file.parentFile?.mkdirs()
-                    FileOutputStream(file).use { fos ->
-                        var len: Int
-                        while (zis.read(buffer).also { len = it } > 0) {
-                            fos.write(buffer, 0, len)
+                entries.add(entry)
+                entry = zis.nextEntry
+            }
+            
+            val totalEntries = entries.size
+            var processedEntries = 0
+            
+            zis.close()
+            zipStream.close()
+            
+            val zipStream2 = context.assets.open(if (label == "Bootstrap") "bootstrap-aarch64.zip" else "server-bundle.zip")
+            ZipInputStream(zipStream2).use { zis2 ->
+                var entry2 = zis2.nextEntry
+                val buffer = ByteArray(4096)
+                
+                while (entry2 != null) {
+                    val progress = startProgress + ((processedEntries * (endProgress - startProgress)) / totalEntries)
+                    _installationState.value = InstallationState.Extracting(
+                        progress,
+                        "解压 ${label}: ${entry2.name}"
+                    )
+                    
+                    val file = File(destDir, entry2.name)
+                    if (entry2.isDirectory) {
+                        file.mkdirs()
+                    } else {
+                        file.parentFile?.mkdirs()
+                        FileOutputStream(file).use { fos ->
+                            var len: Int
+                            while (zis2.read(buffer).also { len = it } > 0) {
+                                fos.write(buffer, 0, len)
+                            }
                         }
                     }
+                    zis2.closeEntry()
+                    entry2 = zis2.nextEntry
+                    processedEntries++
                 }
-                zis.closeEntry()
-                entry = zis.nextEntry
-                count++
             }
         }
     }
@@ -95,10 +133,18 @@ class LinuxSubsystemManager(private val context: Context) {
         if (!scriptFile.exists()) {
             scriptFile.writeText("""
                 #!/bin/bash
-                apt-get update -y
-                apt-get install -y python3 python3-pip
-                pip3 install mempalace chromadb
-                mempalace init ~/my_agent_memory
+                echo "UPDATE_SYSTEM"
+                apt-get update -y 2>&1
+                
+                echo "INSTALL_DEPENDENCIES"
+                apt-get install -y python3 python3-pip 2>&1
+                
+                echo "INSTALL_PYTHON_PACKAGES"
+                pip3 install mempalace chromadb 2>&1
+                
+                echo "INIT_MEMPALACE"
+                mempalace init ~/my_agent_memory 2>&1
+                
                 echo "INSTALLATION_COMPLETE"
             """.trimIndent())
             scriptFile.setExecutable(true)
@@ -119,11 +165,48 @@ class LinuxSubsystemManager(private val context: Context) {
         processBuilder.redirectErrorStream(true)
         val process = processBuilder.start()
 
+        val outputLines = mutableListOf<String>()
+        var currentStep = 0
+        val steps = listOf(
+            "UPDATE_SYSTEM" to 0,
+            "INSTALL_DEPENDENCIES" to 25,
+            "INSTALL_PYTHON_PACKAGES" to 50,
+            "INIT_MEMPALACE" to 75,
+            "INSTALLATION_COMPLETE" to 100
+        )
+
         process.inputStream.bufferedReader().forEachLine { line ->
-            _installationState.value = InstallationState.Installing(line)
+            Log.d(TAG, "Install: $line")
+            outputLines.add(line)
+            
+            val matchedStep = steps.find { line.contains(it.first) }
+            if (matchedStep != null) {
+                currentStep = matchedStep.second
+            }
+            
+            val displayMessage = when {
+                line.contains("UPDATE_SYSTEM") -> "更新系统包..."
+                line.contains("INSTALL_DEPENDENCIES") -> "安装系统依赖..."
+                line.contains("INSTALL_PYTHON_PACKAGES") -> "安装 Python 包..."
+                line.contains("INIT_MEMPALACE") -> "初始化 MemPalace..."
+                line.contains("INSTALLATION_COMPLETE") -> "安装完成！"
+                else -> line.take(100)
+            }
+            
+            _installationState.value = InstallationState.Installing(
+                currentStep.coerceIn(0, 99),
+                displayMessage,
+                outputLines.takeLast(5)
+            )
         }
 
-        process.waitFor()
+        val exitCode = process.waitFor()
+        if (exitCode != 0) {
+            _installationState.value = InstallationState.Error(
+                message = "安装脚本执行失败 (退出码: $exitCode)",
+                details = outputLines.joinToString("\n")
+            )
+        }
     }
 
     private fun startDaemon() {
@@ -137,10 +220,15 @@ class LinuxSubsystemManager(private val context: Context) {
             "-b", "/sys",
             "-b", "${bootstrapDir.absolutePath}:/root",
             "/bin/bash", "-c",
-            "nohup palace-daemon --port 18989 > /dev/null 2>&1 &"
+            "nohup palace-daemon --port 18989 > /root/daemon.log 2>&1 &"
         )
 
-        processBuilder.start()
+        try {
+            processBuilder.start()
+            Log.d(TAG, "Daemon started")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start daemon", e)
+        }
     }
 
     private suspend fun startDaemonIfNeeded() {
@@ -152,14 +240,18 @@ class LinuxSubsystemManager(private val context: Context) {
                     "-0",
                     "-r", bootstrapDir.absolutePath,
                     "/bin/bash", "-c",
-                    "ps aux | grep -v grep | grep palace-daemon"
+                    "ps aux | grep -v grep | grep palace-daemon || echo 'NOT_RUNNING'"
                 ).start()
 
                 val result = checkProcess.inputStream.bufferedReader().readText()
-                if (result.isBlank()) {
+                if (result.contains("NOT_RUNNING") || result.isBlank()) {
+                    Log.d(TAG, "Daemon not running, starting...")
                     startDaemon()
+                } else {
+                    Log.d(TAG, "Daemon already running")
                 }
             } catch (e: Exception) {
+                Log.e(TAG, "Failed to check daemon status", e)
                 startDaemon()
             }
         }
