@@ -7,6 +7,23 @@ class MemoryBridge {
         }
     }
 
+    /**
+     * Initialize memory system by calling mempalace_wake_up
+     */
     external fun initializeMemory(serviceUrl: String, apiKey: String): String
-    external fun searchMemory(query: String): String
+
+    /**
+     * Search memory using mempalace_search tool
+     */
+    external fun searchMemory(query: String, serviceUrl: String, apiKey: String): String
+
+    /**
+     * Call any MCP tool
+     */
+    external fun callMCPTool(
+        toolName: String,
+        argumentsJson: String,
+        serviceUrl: String,
+        apiKey: String
+    ): String
 }

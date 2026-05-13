@@ -4,13 +4,18 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "agent_memory_settings")
 
@@ -237,9 +242,67 @@ class SettingsViewModel(private val context: Context) {
         }
     }
 
+    /**
+     * Register a tool with palace-daemon
+     */
+    suspend fun registerTool(tool: ToolConfig): Result<String> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val mcpConfig = mcpConfig.firstOrNull() ?: return@withContext Result.failure(Exception("MCP config not found"))
+                
+                // Calculate register tool URL (replace /mcp with /register_tool)
+                val baseUrl = mcpConfig.serviceUrl.replace("/mcp", "")
+                val registerUrl = URL("$baseUrl/register_tool")
+                
+                // Build request body
+                val requestBody = json.encodeToString(
+                    mapOf(
+                        "name" to tool.name,
+                        "description" to tool.description,
+                        "parameters" to tool.parameters,
+                        "code" to tool.code
+                    )
+                )
+                
+                // Make HTTP request
+                val connection = registerUrl.openConnection() as HttpURLConnection
+                connection.apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("Authorization", "Bearer ${mcpConfig.apiKey}")
+                    doOutput = true
+                    connectTimeout = 10000
+                    readTimeout = 30000
+                }
+                
+                // Send request
+                connection.outputStream.use { it.write(requestBody.toByteArray(Charsets.UTF_8)) }
+                
+                // Read response
+                val responseCode = connection.responseCode
+                val response = if (responseCode in 200..299) {
+                    connection.inputStream.bufferedReader().use { it.readText() }
+                } else {
+                    connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "Unknown error"
+                }
+                
+                connection.disconnect()
+                
+                if (responseCode in 200..299) {
+                    Result.success(response)
+                } else {
+                    Result.failure(Exception("HTTP $responseCode: $response"))
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Result.failure(e)
+            }
+        }
+    }
+
     private suspend fun <T> Flow<T>.getOrNull(): T? {
         return try {
-            this.map { it }.firstOrNull()
+            this.firstOrNull()
         } catch (e: Exception) {
             null
         }

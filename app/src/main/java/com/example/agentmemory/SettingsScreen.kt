@@ -44,6 +44,7 @@ fun SettingsScreen(
     var showKnowledgeBaseDialog by remember { mutableStateOf(false) }
     var showRuleDialog by remember { mutableStateOf(false) }
     var currentEditItem by remember { mutableStateOf<Any?>(null) }
+    var isRegisteringTool by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         viewModel.modelConfig.collect { modelConfig = it }
@@ -156,6 +157,48 @@ fun SettingsScreen(
                     }
                 )
             }
+            
+            if (showToolDialog) {
+                ToolDialog(
+                    initialTool = currentEditItem as? ToolConfig,
+                    isRegistering = isRegisteringTool,
+                    onDismiss = { showToolDialog = false },
+                    onSave = { tool ->
+                        scope.launch {
+                            isRegisteringTool = true
+                            try {
+                                // Try to register the tool with palace-daemon
+                                val registerResult = viewModel.registerTool(tool)
+                                if (registerResult.isSuccess) {
+                                    Toast.makeText(context, "工具注册成功", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(
+                                        context, 
+                                        "工具注册失败: ${registerResult.exceptionOrNull()?.message}", 
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            } catch (e: Exception) {
+                                Toast.makeText(
+                                    context, 
+                                    "工具注册出错: ${e.message}", 
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                            // Always save to local config
+                            val existingIndex = tools.indexOfFirst { it.name == tool.name }
+                            tools = if (existingIndex >= 0) {
+                                tools.toMutableList().also { it[existingIndex] = tool }
+                            } else {
+                                tools + tool
+                            }
+                            viewModel.saveToolsConfig(tools)
+                            isRegisteringTool = false
+                            showToolDialog = false
+                        }
+                    }
+                )
+            }
             item {
                 SkillsSection(
                     skills = skills,
@@ -220,22 +263,6 @@ fun SettingsScreen(
                 )
             }
         }
-    }
-
-    if (showToolDialog) {
-        ToolDialog(
-            initialTool = currentEditItem as? ToolConfig,
-            onDismiss = { showToolDialog = false },
-            onSave = { tool ->
-                if (currentEditItem != null) {
-                    tools = tools.map { if (it == currentEditItem) tool else it }
-                } else {
-                    tools = tools + tool
-                }
-                scope.launch { viewModel.saveToolsConfig(tools) }
-                showToolDialog = false
-            }
-        )
     }
 
     if (showSkillDialog) {
@@ -467,6 +494,7 @@ fun ToolItem(
 @Composable
 fun ToolDialog(
     initialTool: ToolConfig?,
+    isRegistering: Boolean,
     onDismiss: () -> Unit,
     onSave: (ToolConfig) -> Unit
 ) {
@@ -477,7 +505,7 @@ fun ToolDialog(
     var code by remember { mutableStateOf(initialTool?.code ?: "") }
     
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = if (!isRegistering) onDismiss else {},
         title = { Text(if (initialTool == null) "Add Tool" else "Edit Tool") },
         text = {
             LazyColumn {
@@ -487,7 +515,8 @@ fun ToolDialog(
                         onValueChange = { name = it },
                         label = { Text(context.getString(R.string.function_name)) },
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
+                        singleLine = true,
+                        enabled = !isRegistering
                     )
                 }
                 item {
@@ -496,7 +525,8 @@ fun ToolDialog(
                         value = description,
                         onValueChange = { description = it },
                         label = { Text(context.getString(R.string.description)) },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isRegistering
                     )
                 }
                 item {
@@ -516,22 +546,42 @@ fun ToolDialog(
                         label = { Text(context.getString(R.string.code)) },
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 5,
-                        maxLines = 15
+                        maxLines = 15,
+                        enabled = !isRegistering
                     )
+                }
+                if (isRegistering) {
+                    item {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("正在注册工具...")
+                        }
+                    }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                if (name.isNotBlank() && description.isNotBlank() && code.isNotBlank()) {
-                    onSave(ToolConfig(name, description, parameters, code))
-                }
-            }) {
+            TextButton(
+                onClick = {
+                    if (name.isNotBlank() && description.isNotBlank() && code.isNotBlank()) {
+                        onSave(ToolConfig(name, description, parameters, code))
+                    }
+                },
+                enabled = !isRegistering && name.isNotBlank() && description.isNotBlank() && code.isNotBlank()
+            ) {
                 Text(context.getString(R.string.save))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isRegistering
+            ) {
                 Text(context.getString(R.string.cancel))
             }
         }

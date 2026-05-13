@@ -116,7 +116,11 @@ fun VerifyScreen(
                                 isLoading = true
                                 try {
                                     withContext(Dispatchers.IO) {
-                                        val response = memoryBridge.searchMemory(query)
+                                        val response = memoryBridge.searchMemory(
+                                            query,
+                                            mcpConfig.serviceUrl,
+                                            mcpConfig.apiKey
+                                        )
                                         result = "Search Result:\n$response"
                                     }
                                 } catch (e: Exception) {
