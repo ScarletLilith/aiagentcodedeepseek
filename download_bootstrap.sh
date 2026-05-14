@@ -15,15 +15,18 @@ NC='\033[0m' # No Color
 DEST_DIR="app/src/main/assets"
 DEST_FILE="$DEST_DIR/bootstrap-aarch64.zip"
 
-# 镜像源列表（依次尝试）
+# 镜像源列表（依次尝试）- 更新到最新可用源
 MIRRORS=(
-    # 国内镜像（优先）
-    "https://ghproxy.com/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip"
-    "https://ghproxy.net/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip"
-    "https://mirror.ghproxy.com/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip"
-    # GitHub 原始源
+    # GitHub 官方直连（最新版本 2024.06.09）
+    "https://github.com/termux/termux-packages/releases/download/bootstrap-2024.06.09-r1%2Bapt-android-7/bootstrap-aarch64.zip"
+    # GitHub 原始路径
+    "https://github.com/termux/termux-packages/releases/download/bootstrap-2024.06.09-r1+apt-android-7/bootstrap-aarch64.zip"
+    # 国内镜像
+    "https://ghproxy.com/https://github.com/termux/termux-packages/releases/download/bootstrap-2024.06.09-r1%2Bapt-android-7/bootstrap-aarch64.zip"
+    "https://ghproxy.net/https://github.com/termux/termux-packages/releases/download/bootstrap-2024.06.09-r1%2Bapt-android-7/bootstrap-aarch64.zip"
+    # Andronix 源
     "https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip"
-    "https://github.com/termux/termux-packages/releases/download/bootstrap-2024.01.22/bootstrap-aarch64.zip"
+    "https://ghproxy.com/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip"
 )
 
 print_info() {
@@ -68,57 +71,66 @@ if [ -f "$DEST_FILE" ]; then
     rm -f "$DEST_FILE"
 fi
 
+print_info "共 ${#MIRRORS[@]} 个镜像源将依次尝试"
+echo ""
+
 # 尝试下载
 for ((i=0; i<${#MIRRORS[@]}; i++)); do
     mirror=${MIRRORS[$i]}
     mirror_num=$((i + 1))
     
-    print_info "尝试镜像 $mirror_num/${#MIRRORS[@]}: $mirror"
+    print_info "尝试镜像 $mirror_num/${#MIRRORS[@]}..."
     
     if command -v wget &> /dev/null; then
         # 使用 wget
-        if wget --timeout=30 --tries=2 -O "$DEST_FILE" "$mirror"; then
+        if wget --timeout=60 --tries=1 -O "$DEST_FILE" "$mirror" 2>&1 | grep -q "saved\|HTTP"; then
             print_success "下载成功！"
             break
         else
-            print_warning "镜像 $mirror_num 下载失败"
+            print_warning "镜像 $mirror_num 下载失败，尝试下一个..."
             rm -f "$DEST_FILE" 2>/dev/null || true
             continue
         fi
     elif command -v curl &> /dev/null; then
         # 使用 curl
-        if curl -L --max-time 30 --retry 2 -o "$DEST_FILE" "$mirror"; then
+        if curl -L --max-time 60 --fail -o "$DEST_FILE" "$mirror" 2>/dev/null; then
             print_success "下载成功！"
             break
         else
-            print_warning "镜像 $mirror_num 下载失败"
+            print_warning "镜像 $mirror_num 下载失败，尝试下一个..."
             rm -f "$DEST_FILE" 2>/dev/null || true
             continue
         fi
     else
         print_error "未找到 wget 或 curl，请先安装其中一个"
+        echo "pkg install wget"
         exit 1
     fi
 done
 
 # 检查是否下载成功
 if [ ! -f "$DEST_FILE" ]; then
-    print_error "所有镜像源都下载失败，请检查网络连接"
+    print_error "所有镜像源都下载失败"
     echo ""
-    echo "你也可以手动下载文件到：$DEST_DIR/"
-    echo "下载地址：https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip"
+    echo "你也可以手动下载文件："
+    echo "1. 打开浏览器访问："
+    echo "   https://github.com/termux/termux-packages/releases/tag/bootstrap-2024.06.09-r1+apt-android-7"
+    echo ""
+    echo "2. 下载 bootstrap-aarch64.zip (26.1 MB)"
+    echo ""
+    echo "3. 复制到: $DEST_DIR/"
     exit 1
 fi
 
 # 验证文件
-print_info "验证文件..."
-ls -lh "$DEST_FILE"
+file_size=$(stat -c%s "$DEST_FILE" 2>/dev/null || stat -f%z "$DEST_FILE" 2>/dev/null)
+file_size_mb=$((file_size / 1024 / 1024))
 
-# 尝试解压预览
-if command -v unzip &> /dev/null; then
-    echo ""
-    print_info "解压预览（前20个文件）："
-    unzip -l "$DEST_FILE" 2>/dev/null | head -30 || true
+print_success "文件大小: ${file_size_mb} MB"
+
+if [ "$file_size_mb" -lt 20 ]; then
+    print_warning "文件可能不完整（小于 20MB）"
+    print_info "正确的 bootstrap-aarch64.zip 应该是 26MB 左右"
 fi
 
 print_success ""

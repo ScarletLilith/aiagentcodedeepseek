@@ -16,15 +16,17 @@ class LinuxSubsystemManager(private val context: Context) {
     companion object {
         private const val TAG = "LinuxSubsystem"
         
-        // 镜像源列表（依次尝试）
+        // 镜像源列表（依次尝试）- 更新到最新可用源
         private val BOOTSTRAP_MIRRORS = listOf(
-            // 国内镜像（优先）
-            "https://ghproxy.com/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip",
-            "https://ghproxy.net/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip",
-            "https://mirror.ghproxy.com/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip",
-            // GitHub 原始源
+            // GitHub 官方直连（最新版本 2024.06.09）
+            "https://github.com/termux/termux-packages/releases/download/bootstrap-2024.06.09-r1%2Bapt-android-7/bootstrap-aarch64.zip",
+            "https://github.com/termux/termux-packages/releases/download/bootstrap-2024.06.09-r1+apt-android-7/bootstrap-aarch64.zip",
+            // 国内镜像
+            "https://ghproxy.com/https://github.com/termux/termux-packages/releases/download/bootstrap-2024.06.09-r1%2Bapt-android-7/bootstrap-aarch64.zip",
+            "https://ghproxy.net/https://github.com/termux/termux-packages/releases/download/bootstrap-2024.06.09-r1%2Bapt-android-7/bootstrap-aarch64.zip",
+            // Andronix 源
             "https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip",
-            "https://github.com/termux/termux-packages/releases/download/bootstrap-2024.01.22/bootstrap-aarch64.zip"
+            "https://ghproxy.com/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip"
         )
     }
 
