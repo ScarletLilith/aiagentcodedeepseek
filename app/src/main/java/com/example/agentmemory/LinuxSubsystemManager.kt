@@ -8,17 +8,20 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URL
 import java.util.zip.ZipInputStream
 
 class LinuxSubsystemManager(private val context: Context) {
 
     companion object {
         private const val TAG = "LinuxSubsystem"
-        private const val INSTALL_TIMEOUT_MS = 600000L
+        private const val BOOTSTRAP_URL = "https://github.com/termux/proot/releases/download/v5.4.0/bootstrap-aarch64.zip"
     }
 
     sealed class InstallationState {
         object Idle : InstallationState()
+        object Skipped : InstallationState()
+        data class Downloading(val progress: Int, val message: String) : InstallationState()
         data class Extracting(val progress: Int, val currentFile: String = "") : InstallationState()
         data class Installing(val progress: Int, val message: String, val details: List<String> = emptyList()) : InstallationState()
         object Complete : InstallationState()
@@ -34,10 +37,19 @@ class LinuxSubsystemManager(private val context: Context) {
     private val installedFlag: File
         get() = File(bootstrapDir, ".installed")
 
+    private val bootstrapZipFile: File
+        get() = File(context.filesDir, "bootstrap-aarch64.zip")
+
     suspend fun setupSubsystemIfNeeded() {
         if (installedFlag.exists()) {
             _installationState.value = InstallationState.Complete
             startDaemonIfNeeded()
+            return
+        }
+
+        if (!checkAssetsExist()) {
+            Log.w(TAG, "Assets not found, Linux subsystem skipped")
+            _installationState.value = InstallationState.Skipped
             return
         }
 
@@ -66,12 +78,89 @@ class LinuxSubsystemManager(private val context: Context) {
         }
     }
 
-    private fun extractAssets() {
-        val bootstrapZip = context.assets.open("bootstrap-aarch64.zip")
-        val serverBundleZip = context.assets.open("server-bundle.zip")
+    private fun checkAssetsExist(): Boolean {
+        return try {
+            context.assets.open("bootstrap-aarch64.zip").use { true }
+        } catch (e: Exception) {
+            Log.d(TAG, "bootstrap-aarch64.zip not found in assets")
+            false
+        }
+    }
 
-        extractZip(bootstrapZip, bootstrapDir, 0, 50, "Bootstrap")
-        extractZip(serverBundleZip, bootstrapDir, 50, 100, "Server Bundle")
+    private fun extractAssets() {
+        try {
+            val bootstrapZip = context.assets.open("bootstrap-aarch64.zip")
+            extractZip(bootstrapZip, bootstrapDir, 0, 100, "Bootstrap")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to extract bootstrap from assets", e)
+            downloadAndExtractBootstrap()
+        }
+
+        try {
+            val serverBundleZip = context.assets.open("server-bundle.zip")
+            extractZip(serverBundleZip, bootstrapDir, 50, 100, "Server Bundle")
+        } catch (e: Exception) {
+            Log.w(TAG, "server-bundle.zip not found in assets, skipping")
+        }
+    }
+
+    private suspend fun downloadAndExtractBootstrap() {
+        withContext(Dispatchers.IO) {
+            try {
+                _installationState.value = InstallationState.Downloading(0, "正在下载 Linux 子系统...")
+                
+                val url = URL(BOOTSTRAP_URL)
+                val connection = url.openConnection()
+                connection.connect()
+                
+                val totalSize = connection.contentLength
+                var downloadedSize = 0
+                
+                bootstrapZipFile.parentFile?.mkdirs()
+                
+                url.openStream().use { input ->
+                    FileOutputStream(bootstrapZipFile).use { output ->
+                        val buffer = ByteArray(4096)
+                        var bytesRead: Int
+                        
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                            downloadedSize += bytesRead
+                            
+                            val progress = if (totalSize > 0) {
+                                (downloadedSize * 100 / totalSize)
+                            } else {
+                                -1
+                            }
+                            
+                            _installationState.value = InstallationState.Downloading(
+                                progress,
+                                "下载中: ${formatSize(downloadedSize)} / ${formatSize(totalSize)}"
+                            )
+                        }
+                    }
+                }
+                
+                _installationState.value = InstallationState.Downloading(100, "下载完成")
+                
+                bootstrapZipFile.inputStream().use { zipStream ->
+                    extractZip(zipStream, bootstrapDir, 0, 100, "Bootstrap")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to download bootstrap", e)
+                throw e
+            }
+        }
+    }
+
+    private fun formatSize(bytes: Int): String {
+        return if (bytes < 1024) {
+            "$bytes B"
+        } else if (bytes < 1024 * 1024) {
+            "${bytes / 1024} KB"
+        } else {
+            "${bytes / (1024 * 1024)} MB"
+        }
     }
 
     private fun extractZip(
@@ -94,15 +183,18 @@ class LinuxSubsystemManager(private val context: Context) {
             var processedEntries = 0
             
             zis.close()
-            zipStream.close()
             
-            val zipStream2 = context.assets.open(if (label == "Bootstrap") "bootstrap-aarch64.zip" else "server-bundle.zip")
-            ZipInputStream(zipStream2).use { zis2 ->
+            val zipSource = when {
+                zipStream is ZipInputStream -> return@use
+                else -> context.assets.open("bootstrap-aarch64.zip")
+            }
+            
+            ZipInputStream(zipSource).use { zis2 ->
                 var entry2 = zis2.nextEntry
                 val buffer = ByteArray(4096)
                 
                 while (entry2 != null) {
-                    val progress = startProgress + ((processedEntries * (endProgress - startProgress)) / totalEntries)
+                    val progress = startProgress + ((processedEntries * (endProgress - startProgress)) / totalEntries.coerceAtLeast(1))
                     _installationState.value = InstallationState.Extracting(
                         progress,
                         "解压 ${label}: ${entry2.name}"
@@ -151,6 +243,14 @@ class LinuxSubsystemManager(private val context: Context) {
         }
 
         val prootPath = File(bootstrapDir, "usr/bin/proot").absolutePath
+        if (!File(prootPath).exists()) {
+            Log.e(TAG, "PRoot not found at $prootPath")
+            _installationState.value = InstallationState.Error(
+                message = "PRoot 未找到，请确保 assets 中包含 bootstrap-aarch64.zip"
+            )
+            return
+        }
+
         val processBuilder = ProcessBuilder(
             prootPath,
             "-0",
@@ -255,5 +355,9 @@ class LinuxSubsystemManager(private val context: Context) {
                 startDaemon()
             }
         }
+    }
+
+    fun isLinuxSubsystemAvailable(): Boolean {
+        return checkAssetsExist() || bootstrapZipFile.exists()
     }
 }
