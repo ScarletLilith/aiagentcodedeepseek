@@ -15,13 +15,23 @@ class LinuxSubsystemManager(private val context: Context) {
 
     companion object {
         private const val TAG = "LinuxSubsystem"
-        private const val BOOTSTRAP_URL = "https://github.com/termux/proot/releases/download/v5.4.0/bootstrap-aarch64.zip"
+        
+        // 镜像源列表（依次尝试）
+        private val BOOTSTRAP_MIRRORS = listOf(
+            // 国内镜像（优先）
+            "https://ghproxy.com/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip",
+            "https://ghproxy.net/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip",
+            "https://mirror.ghproxy.com/https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip",
+            // GitHub 原始源
+            "https://github.com/AndronixApp/AndronixOrigin/raw/master/bootstrap-aarch64.zip",
+            "https://github.com/termux/termux-packages/releases/download/bootstrap-2024.01.22/bootstrap-aarch64.zip"
+        )
     }
 
     sealed class InstallationState {
         object Idle : InstallationState()
         object Skipped : InstallationState()
-        data class Downloading(val progress: Int, val message: String) : InstallationState()
+        data class Downloading(val progress: Int, val message: String, val mirrorIndex: Int = 0) : InstallationState()
         data class Extracting(val progress: Int, val currentFile: String = "") : InstallationState()
         data class Installing(val progress: Int, val message: String, val details: List<String> = emptyList()) : InstallationState()
         object Complete : InstallationState()
@@ -47,34 +57,65 @@ class LinuxSubsystemManager(private val context: Context) {
             return
         }
 
-        if (!checkAssetsExist()) {
-            Log.w(TAG, "Assets not found, Linux subsystem skipped")
-            _installationState.value = InstallationState.Skipped
+        if (checkAssetsExist()) {
+            Log.d(TAG, "Assets found, installing from assets")
+            withContext(Dispatchers.IO) {
+                try {
+                    bootstrapDir.mkdirs()
+                    
+                    _installationState.value = InstallationState.Extracting(0, "准备解压...")
+                    extractAssets()
+                    _installationState.value = InstallationState.Extracting(100, "解压完成")
+
+                    _installationState.value = InstallationState.Installing(0, "开始安装...", listOf("正在初始化 Linux 子系统..."))
+                    runInstallationScript()
+
+                    installedFlag.createNewFile()
+                    _installationState.value = InstallationState.Complete
+
+                    startDaemon()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Installation from assets failed", e)
+                    _installationState.value = InstallationState.Error(
+                        message = "Assets 安装失败: ${e.message}",
+                        details = e.stackTraceToString()
+                    )
+                }
+            }
             return
         }
 
+        // Assets 不存在，尝试下载
+        Log.d(TAG, "Assets not found, attempting to download")
+        downloadAndInstallSubsystem()
+    }
+
+    private suspend fun downloadAndInstallSubsystem() {
         withContext(Dispatchers.IO) {
-            try {
-                bootstrapDir.mkdirs()
-                
-                _installationState.value = InstallationState.Extracting(0, "准备解压...")
-                extractAssets()
-                _installationState.value = InstallationState.Extracting(100, "解压完成")
+            var lastError: Exception? = null
+            
+            for ((index, mirror) in BOOTSTRAP_MIRRORS.withIndex()) {
+                try {
+                    Log.d(TAG, "Trying mirror ${index + 1}/${BOOTSTRAP_MIRRORS.size}: $mirror")
+                    downloadAndExtractBootstrap(mirror, index)
+                    
+                    _installationState.value = InstallationState.Installing(0, "开始安装...", listOf("正在初始化 Linux 子系统..."))
+                    runInstallationScript()
 
-                _installationState.value = InstallationState.Installing(0, "开始安装...", listOf("正在初始化 Linux 子系统..."))
-                runInstallationScript()
-
-                installedFlag.createNewFile()
-                _installationState.value = InstallationState.Complete
-
-                startDaemon()
-            } catch (e: Exception) {
-                Log.e(TAG, "Installation failed", e)
-                _installationState.value = InstallationState.Error(
-                    message = "安装失败: ${e.message}",
-                    details = e.stackTraceToString()
-                )
+                    installedFlag.createNewFile()
+                    _installationState.value = InstallationState.Complete
+                    startDaemon()
+                    return@withContext
+                } catch (e: Exception) {
+                    Log.e(TAG, "Mirror $mirror failed", e)
+                    lastError = e
+                }
             }
+
+            _installationState.value = InstallationState.Error(
+                message = "所有镜像源都无法下载，请检查网络",
+                details = lastError?.stackTraceToString()
+            )
         }
     }
 
@@ -93,7 +134,7 @@ class LinuxSubsystemManager(private val context: Context) {
             extractZip(bootstrapZip, bootstrapDir, 0, 100, "Bootstrap")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to extract bootstrap from assets", e)
-            downloadAndExtractBootstrap()
+            throw e
         }
 
         try {
@@ -104,51 +145,47 @@ class LinuxSubsystemManager(private val context: Context) {
         }
     }
 
-    private suspend fun downloadAndExtractBootstrap() {
+    private suspend fun downloadAndExtractBootstrap(mirrorUrl: String, mirrorIndex: Int) {
         withContext(Dispatchers.IO) {
-            try {
-                _installationState.value = InstallationState.Downloading(0, "正在下载 Linux 子系统...")
-                
-                val url = URL(BOOTSTRAP_URL)
-                val connection = url.openConnection()
-                connection.connect()
-                
-                val totalSize = connection.contentLength
-                var downloadedSize = 0
-                
-                bootstrapZipFile.parentFile?.mkdirs()
-                
-                url.openStream().use { input ->
-                    FileOutputStream(bootstrapZipFile).use { output ->
-                        val buffer = ByteArray(4096)
-                        var bytesRead: Int
+            _installationState.value = InstallationState.Downloading(0, "正在下载 Linux 子系统 (镜像 ${mirrorIndex + 1})...", mirrorIndex)
+            
+            val url = URL(mirrorUrl)
+            val connection = url.openConnection()
+            connection.connect()
+            
+            val totalSize = connection.contentLength
+            var downloadedSize = 0
+            
+            bootstrapZipFile.parentFile?.mkdirs()
+            
+            url.openStream().use { input ->
+                FileOutputStream(bootstrapZipFile).use { output ->
+                    val buffer = ByteArray(4096)
+                    var bytesRead: Int
+                    
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        output.write(buffer, 0, bytesRead)
+                        downloadedSize += bytesRead
                         
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
-                            output.write(buffer, 0, bytesRead)
-                            downloadedSize += bytesRead
-                            
-                            val progress = if (totalSize > 0) {
-                                (downloadedSize * 100 / totalSize)
-                            } else {
-                                -1
-                            }
-                            
-                            _installationState.value = InstallationState.Downloading(
-                                progress,
-                                "下载中: ${formatSize(downloadedSize)} / ${formatSize(totalSize)}"
-                            )
+                        val progress = if (totalSize > 0) {
+                            (downloadedSize * 100 / totalSize)
+                        } else {
+                            -1
                         }
+                        
+                        _installationState.value = InstallationState.Downloading(
+                            progress,
+                            "下载中: ${formatSize(downloadedSize)} / ${formatSize(totalSize)} (镜像 ${mirrorIndex + 1})",
+                            mirrorIndex
+                        )
                     }
                 }
-                
-                _installationState.value = InstallationState.Downloading(100, "下载完成")
-                
-                bootstrapZipFile.inputStream().use { zipStream ->
-                    extractZip(zipStream, bootstrapDir, 0, 100, "Bootstrap")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to download bootstrap", e)
-                throw e
+            }
+            
+            _installationState.value = InstallationState.Downloading(100, "下载完成", mirrorIndex)
+            
+            bootstrapZipFile.inputStream().use { zipStream ->
+                extractZip(zipStream, bootstrapDir, 0, 100, "Bootstrap")
             }
         }
     }
@@ -171,7 +208,7 @@ class LinuxSubsystemManager(private val context: Context) {
         label: String
     ) {
         ZipInputStream(zipStream).use { zis ->
-            val entries = mutableListOf<ZipEntry>()
+            val entries = mutableListOf<java.util.zip.ZipEntry>()
             var entry = zis.nextEntry
             
             while (entry != null) {
@@ -246,7 +283,7 @@ class LinuxSubsystemManager(private val context: Context) {
         if (!File(prootPath).exists()) {
             Log.e(TAG, "PRoot not found at $prootPath")
             _installationState.value = InstallationState.Error(
-                message = "PRoot 未找到，请确保 assets 中包含 bootstrap-aarch64.zip"
+                message = "PRoot 未找到，请确保 bootstrap 文件完整"
             )
             return
         }
